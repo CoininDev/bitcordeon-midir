@@ -1,18 +1,14 @@
 use midir::{MidiOutput, MidiOutputConnection, os::unix::VirtualOutput};
 
-use crate::music::{self, NOTES};
-
+use crate::midi::{clear_notes, orchestrate};
+use crate::music::{self, State};
 pub struct MyEguiApp {
-    pub single: bool,
-    pub minor: bool,
     pub conn_out: Option<MidiOutputConnection>,
-    pub last_note: Option<u8>,
-    pub current_note: Option<u8>,
-    pub current_midi_notes: Vec<u8>,
+    pub state: State,
 }
 
 impl MyEguiApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         // Customize egui here with cc.egui_ctx.set_fonts and cc.egui_ctx.set_visuals.
         // Restore app state using cc.storage (requires the "persistence" feature).
         // Use the cc.gl (a glow::Context) to create graphics shaders and buffers that you can use
@@ -20,12 +16,8 @@ impl MyEguiApp {
         let midi_out = MidiOutput::new("BitCordeon").unwrap();
         let conn_out = Some(midi_out.create_virtual("BitCordeon Out").unwrap());
         Self {
-            single: false,
-            minor: false,
             conn_out: conn_out,
-            current_note: None,
-            last_note: None,
-            current_midi_notes: vec![],
+            state: State::default(),
         }
     }
 
@@ -34,86 +26,136 @@ impl MyEguiApp {
         let b2 = ctx.input(|i| i.key_down(egui::Key::Num2)) as u8;
         let b3 = ctx.input(|i| i.key_down(egui::Key::Num3)) as u8;
         let sharp = ctx.input(|i| i.key_down(egui::Key::Num4)) as u8;
-        self.minor = ctx.input(|i| i.key_down(egui::Key::Escape));
+        self.state.minor = ctx.input(|i| i.key_down(egui::Key::Escape));
+        self.state.sept = ctx.input(|i| i.key_down(egui::Key::Q));
+        self.state.playing = ctx.input(|i| i.key_down(egui::Key::Space));
 
         let bitmap = b1 << 2 | b2 << 1 | b3;
 
         if ctx.input(|i| i.key_down(egui::Key::Semicolon)) {
-            self.single = !self.single;
+            self.state.single = !self.state.single;
         }
 
         if bitmap != 0 {
-            self.current_note = Some((music::simple_to_chromatic(bitmap - 1) + sharp) % 14);
+            let chromatic = music::simple_to_chromatic(bitmap - 1) + sharp; // 0..11
+            let root_midi = 60u8 + chromatic; // 60 é C4; chromatic 0 -> C4, 11 -> B4
+            self.state.current_note = Some(root_midi);
         } else {
-            self.current_note = None;
+            self.state.current_note = None;
         }
-        dbg!(self.current_note);
-    }
-
-    fn interpretate_note(&self, conn: &mut MidiOutputConnection, current: u8, last: u8) {
-        if self.single {
-            self.play_single_note(conn, current);
-        } else {
-        }
-    }
-
-    fn play_single_note(&self, conn: &mut MidiOutputConnection, current: u8) {
-        conn.send(&[0x90, NOTES[current as usize], 100])
-            .expect("impossível tocar nota");
-    }
-    fn clear_notes(&mut self, conn: &mut MidiOutputConnection) {
-        for &note in &self.current_midi_notes {
-            self.stop_single_note(conn, note);
-        }
-        self.current_midi_notes.clear();
-    }
-    fn stop_single_note(&self, conn: &mut MidiOutputConnection, last: u8) {
-        conn.send(&[0x80, NOTES[last as usize], 0])
-            .expect("impossível parar nota");
     }
 
     fn play_note(&mut self) {
-        if let Some(ref mut conn) = self.conn_out {
-            match (self.last_note, self.current_note) {
+        // Se não tem conexão MIDI, apenas manutenção de estado local
+        if self.conn_out.is_none() {
+            if !self.state.playing {
+                self.state.current_midi_notes.clear();
+                self.state.last_note = None;
+                // zera os last modes também
+                self.state.last_minor = false;
+                self.state.last_sept = false;
+            }
+            return;
+        }
+
+        // Pega a conexão mutável só uma vez
+        if let Some(conn) = self.conn_out.as_mut() {
+            // Se não estiver tocando, garante que tudo pare
+            if !self.state.playing {
+                self.state = clear_notes(&self.state, conn);
+                self.state.last_note = None;
+                self.state.last_minor = false;
+                self.state.last_sept = false;
+                return;
+            }
+
+            // Aqui: playing == true
+            match (self.state.last_note, self.state.current_note) {
+                // nota mudou -> para antigas e toca novas
                 (Some(last), Some(current)) if last != current => {
-                    self.clear_notes(conn);
-                    // Liga a nota nova
-                    self.last_note = Some(current);
+                    self.state = clear_notes(&self.state, conn);
+                    self.state = orchestrate(&self.state, conn, current);
+                    self.state.last_note = Some(current);
+                    self.state.last_minor = self.state.minor;
+                    self.state.last_sept = self.state.sept;
+                    self.state.last_single = self.state.single;
                 }
-                (None, Some(current)) => {
-                    // Liga a nova nota
-                    conn.send(&[0x90, NOTES[current as usize], 100])
-                        .expect("impossível tocar nota");
-                    self.last_note = Some(current);
-                }
-                (Some(last), None) => {
-                    // Desliga a nota antiga
-                    conn.send(&[0x80, NOTES[last as usize], 0])
-                        .expect("impossível parar nota");
-                    self.last_note = None;
-                }
-                (None, None) => {
-                    // Nenhuma nota ligada, nada a fazer
-                }
+
+                // mesma nota, mas parâmetros (minor/sept) mudaram -> retrigger
                 (Some(last), Some(current)) if last == current => {
-                    // Mesma nota, nada a fazer
+                    if self.state.minor != self.state.last_minor
+                        || self.state.sept != self.state.last_sept
+                        || self.state.last_single != self.state.single
+                    {
+                        // re-aplica o acorde com os novos flags
+                        self.state = clear_notes(&self.state, conn);
+                        self.state = orchestrate(&self.state, conn, current);
+                        self.state.last_minor = self.state.minor;
+                        self.state.last_sept = self.state.sept;
+                        self.state.last_single = self.state.single;
+                        // last_note já é current; mantemos last_note
+                    } else {
+                        // nada a fazer, mesma nota e mesmos parâmetros
+                    }
                 }
-                (Some(_), Some(_)) => {
-                    // erro
+
+                (None, Some(current)) => {
+                    self.state = orchestrate(&self.state, conn, current);
+                    self.state.last_note = Some(current);
+                    self.state.last_minor = self.state.minor;
+                    self.state.last_sept = self.state.sept;
+                    self.state.last_single = self.state.single;
                 }
+
+                // tinha nota, agora não há current -> limpa
+                (Some(_), None) => {
+                    self.state = clear_notes(&self.state, conn);
+                    self.state.last_note = None;
+                    self.state.last_minor = false;
+                    self.state.last_sept = false;
+                    self.state.last_single = false;
+                }
+
+                // nada a fazer para (None, None)
+                (None, None) => {}
+                (Some(_), Some(_)) => {}
             }
         }
     }
 }
 
 impl eframe::App for MyEguiApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.step_music(ctx);
         self.play_note();
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            if let Some(note) = self.current_note {
-                ui.label(music::GRAPHICAL_NOTES[note as usize]);
-                ui.label(music::NOTES[note as usize].to_string());
+            if let Some(note) = self.state.current_note {
+                // note é um valor MIDI (0..127)
+                let name_idx = (note % 12) as usize;
+                let name = music::GRAPHICAL_NOTES[name_idx];
+                // C4 = 60 -> octave = 4  (fórmula: octave = (midi / 12) - 1)
+                let octave = (note as i32 / 12) - 1;
+
+                let minor = if self.state.minor { "m" } else { "" };
+                let sept = if self.state.sept { "7" } else { "" };
+                let single = if self.state.single {
+                    "(single)"
+                } else {
+                    "(chord)"
+                };
+                let playing = if self.state.playing {
+                    "-- playing --"
+                } else {
+                    ""
+                };
+
+                ui.horizontal(|ui| {
+                    ui.label(format!("{}{}{}. oct:{}", name, minor, sept, octave));
+                    ui.label(format!("MIDI:{}", note));
+                });
+                ui.label(single);
+                ui.label(playing);
             }
         });
     }

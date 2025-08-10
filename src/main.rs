@@ -1,3 +1,4 @@
+mod midi;
 mod music;
 mod window;
 use window::MyEguiApp;
