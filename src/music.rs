@@ -1,6 +1,7 @@
 #[derive(Default, PartialEq, Eq, Clone)]
 pub struct State {
     pub note_index: Option<u8>,
+    pub octave: u8,
     pub minor: bool,
     pub single: bool,
     pub sept: bool,
@@ -9,6 +10,7 @@ pub struct State {
     pub playing: bool,
 
     pub last_note: Option<u8>,
+    pub last_octave: u8,
     pub last_minor: bool,
     pub last_sept: bool,
     pub last_single: bool,

@@ -32,13 +32,24 @@ impl MyEguiApp {
 
         let bitmap = b1 << 2 | b2 << 1 | b3;
 
-        if ctx.input(|i| i.key_down(egui::Key::Semicolon)) {
+        if ctx.input(|i| i.key_pressed(egui::Key::Semicolon)) {
             self.state.single = !self.state.single;
+        }
+
+        if ctx.input(|i| i.key_pressed(egui::Key::Period)) {
+            self.state.octave = (self.state.octave + 1) % 9;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Comma)) {
+            if self.state.octave > 0 {
+                self.state.octave -= 1;
+            } else {
+                self.state.octave = 8
+            }
         }
 
         if bitmap != 0 {
             let chromatic = music::simple_to_chromatic(bitmap - 1) + sharp; // 0..11
-            let root_midi = 60u8 + chromatic; // 60 é C4; chromatic 0 -> C4, 11 -> B4
+            let root_midi = (self.state.octave + 1) * 12u8 + chromatic; // 60 é C4; chromatic 0 -> C4, 11 -> B4
             self.state.current_note = Some(root_midi);
         } else {
             self.state.current_note = None;
@@ -66,6 +77,7 @@ impl MyEguiApp {
                 self.state.last_note = None;
                 self.state.last_minor = false;
                 self.state.last_sept = false;
+                self.state.last_octave = 4;
                 return;
             }
 
@@ -79,6 +91,7 @@ impl MyEguiApp {
                     self.state.last_minor = self.state.minor;
                     self.state.last_sept = self.state.sept;
                     self.state.last_single = self.state.single;
+                    self.state.last_octave = self.state.octave;
                 }
 
                 // mesma nota, mas parâmetros (minor/sept) mudaram -> retrigger
@@ -86,6 +99,7 @@ impl MyEguiApp {
                     if self.state.minor != self.state.last_minor
                         || self.state.sept != self.state.last_sept
                         || self.state.last_single != self.state.single
+                        || self.state.last_octave != self.state.octave
                     {
                         // re-aplica o acorde com os novos flags
                         self.state = clear_notes(&self.state, conn);
@@ -93,6 +107,7 @@ impl MyEguiApp {
                         self.state.last_minor = self.state.minor;
                         self.state.last_sept = self.state.sept;
                         self.state.last_single = self.state.single;
+                        self.state.last_octave = self.state.octave;
                         // last_note já é current; mantemos last_note
                     } else {
                         // nada a fazer, mesma nota e mesmos parâmetros
